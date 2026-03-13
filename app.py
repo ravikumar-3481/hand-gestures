@@ -5,108 +5,116 @@ import mediapipe as mp
 from datetime import datetime
 
 # Page Configuration
-st.set_page_config(page_title="AI Gesture Draw", layout="wide", page_icon="✍️")
+st.set_page_config(page_title="AI Gesture Draw", layout="wide")
 
-st.title("✍️ AI Real-Time Gesture Drawing")
-st.markdown("Draw on your screen using simple hand gestures. Optimized for Streamlit Cloud.")
+st.title("✍️ AI Gesture Drawing Board")
+st.write("Raise your index finger to draw. Use index + middle fingers to select colors or erase.")
 
-# --- ROBUST MEDIAPIPE INITIALIZATION ---
-# Using session state to ensure hands model is initialized only once
-if 'hands_model' not in st.session_state:
-    st.session_state.mp_hands = mp.solutions.hands
-    st.session_state.hands_model = st.session_state.mp_hands.Hands(
+# --- STATIC MEDIAPIPE INITIALIZATION ---
+# This is the most stable way to initialize MediaPipe on Streamlit Cloud
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+
+@st.cache_resource
+def get_hands_model():
+    return mp_hands.Hands(
         static_image_mode=False,
         max_num_hands=1,
         min_detection_confidence=0.7,
         min_tracking_confidence=0.5
     )
-    st.session_state.mp_draw = mp.solutions.drawing_utils
 
-# --- VARIABLES & CANVAS SETUP ---
-colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (0, 255, 255)] # BGR: Blue, Green, Red, Yellow
-if 'colorIndex' not in st.session_state:
-    st.session_state.colorIndex = 0
+hands = get_hands_model()
 
-# Sidebar Controls
-st.sidebar.header("Drawing Tools")
-brush_thickness = st.sidebar.slider("Brush Thickness", 5, 50, 20)
-clear_button = st.sidebar.button("Clear Canvas")
+# --- CANVAS SETTINGS ---
+# Define colors in BGR format
+colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (0, 255, 255)] # Blue, Green, Red, Yellow
+color_labels = ["Blue", "Green", "Red", "Yellow", "Eraser"]
 
-# Persistent Canvas Setup
-if 'canvas' not in st.session_state or clear_button:
+if 'color_idx' not in st.session_state:
+    st.session_state.color_idx = 0
+
+# Sidebar controls
+st.sidebar.header("Controls")
+brush_size = st.sidebar.slider("Brush Thickness", 5, 50, 20)
+if st.sidebar.button("Clear Canvas"):
     st.session_state.canvas = np.zeros((720, 1280, 3), np.uint8)
-    # Header UI on Canvas
-    cv2.rectangle(st.session_state.canvas, (40, 1), (140, 80), colors[0], -1) 
-    cv2.rectangle(st.session_state.canvas, (160, 1), (260, 80), colors[1], -1) 
-    cv2.rectangle(st.session_state.canvas, (280, 1), (380, 80), colors[2], -1) 
-    cv2.rectangle(st.session_state.canvas, (400, 1), (500, 80), colors[3], -1) 
-    cv2.rectangle(st.session_state.canvas, (520, 1), (650, 80), (255, 255, 255), -1)
-    cv2.putText(st.session_state.canvas, "ERASE", (545, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+    st.rerun()
 
-# Global tracking for points
-if 'xp' not in st.session_state:
-    st.session_state.xp, st.session_state.yp = 0, 0
+# --- CANVAS INITIALIZATION ---
+if 'canvas' not in st.session_state:
+    st.session_state.canvas = np.zeros((720, 1280, 3), np.uint8)
 
-# Camera Input
-cam_input = st.camera_input("Draw Area (Stay in frame)")
+# Previous tracking points
+if 'prev_x' not in st.session_state:
+    st.session_state.prev_x, st.session_state.prev_y = 0, 0
 
-if cam_input:
+# --- CAMERA INPUT ---
+img_file = st.camera_input("Position yourself in front of the camera")
+
+if img_file:
     # Convert Streamlit image to OpenCV format
-    file_bytes = np.asarray(bytearray(cam_input.read()), dtype=np.uint8)
+    file_bytes = np.asarray(bytearray(img_file.read()), dtype=np.uint8)
     frame = cv2.imdecode(file_bytes, 1)
-    frame = cv2.flip(frame, 1)
+    frame = cv2.flip(frame, 1) # Mirror effect
     h, w, c = frame.shape
 
-    # Process Hand
+    # MediaPipe Processing
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    result = st.session_state.hands_model.process(rgb_frame)
+    results = hands.process(rgb_frame)
 
-    if result.multi_hand_landmarks:
-        for hand_landmarks in result.multi_hand_landmarks:
-            # Get Index and Middle finger tips
-            idx_tip = hand_landmarks.landmark[8]
-            mid_tip = hand_landmarks.landmark[12]
-            
-            cx, cy = int(idx_tip.x * w), int(idx_tip.y * h)
-            mx, my = int(mid_tip.x * w), int(mid_tip.y * h)
+    # UI Header on Canvas (Selections)
+    cv2.rectangle(st.session_state.canvas, (10, 10), (150, 80), colors[0], -1)
+    cv2.rectangle(st.session_state.canvas, (170, 10), (310, 80), colors[1], -1)
+    cv2.rectangle(st.session_state.canvas, (330, 10), (470, 80), colors[2], -1)
+    cv2.rectangle(st.session_state.canvas, (490, 10), (630, 80), colors[3], -1)
+    cv2.rectangle(st.session_state.canvas, (650, 10), (800, 80), (255, 255, 255), -1)
+    cv2.putText(st.session_state.canvas, "ERASER", (675, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
 
-            # Selection Mode: Two fingers UP
-            if idx_tip.y < hand_landmarks.landmark[6].y and mid_tip.y < hand_landmarks.landmark[10].y:
-                st.session_state.xp, st.session_state.yp = 0, 0
-                cv2.circle(frame, (cx, cy), 15, (255, 255, 255), cv2.FILLED)
+    if results.multi_hand_landmarks:
+        for hand_lms in results.multi_hand_landmarks:
+            # Tip of index and middle fingers
+            # Landmark 8 = Index Tip, 12 = Middle Tip
+            idx_x = int(hand_lms.landmark[8].x * w)
+            idx_y = int(hand_lms.landmark[8].y * h)
+            mid_x = int(hand_lms.landmark[12].x * w)
+            mid_y = int(hand_lms.landmark[12].y * h)
+
+            # Check if fingers are up (Selection Mode = 2 fingers)
+            if hand_lms.landmark[8].y < hand_lms.landmark[6].y and hand_lms.landmark[12].y < hand_lms.landmark[10].y:
+                st.session_state.prev_x, st.session_state.prev_y = 0, 0 # Reset drawing
                 
-                if cy < 80:
-                    if 40 < cx < 140: st.session_state.colorIndex = 0
-                    elif 160 < cx < 260: st.session_state.colorIndex = 1
-                    elif 280 < cx < 380: st.session_state.colorIndex = 2
-                    elif 400 < cx < 500: st.session_state.colorIndex = 3
-                    elif 520 < cx < 650: st.session_state.colorIndex = -1 # Eraser
-
-            # Draw Mode: Index finger ONLY up
-            elif idx_tip.y < hand_landmarks.landmark[6].y and mid_tip.y > hand_landmarks.landmark[10].y:
-                draw_color = (0, 0, 0) if st.session_state.colorIndex == -1 else colors[st.session_state.colorIndex]
-                thickness = 50 if st.session_state.colorIndex == -1 else brush_thickness
+                # Selection Logic
+                if idx_y < 80:
+                    if 10 < idx_x < 150: st.session_state.color_idx = 0
+                    elif 170 < idx_x < 310: st.session_state.color_idx = 1
+                    elif 330 < idx_x < 470: st.session_state.color_idx = 2
+                    elif 490 < idx_x < 630: st.session_state.color_idx = 3
+                    elif 650 < idx_x < 800: st.session_state.color_idx = -1 # Eraser
                 
-                cv2.circle(frame, (cx, cy), 10, draw_color, cv2.FILLED)
-                
-                if st.session_state.xp == 0 and st.session_state.yp == 0:
-                    st.session_state.xp, st.session_state.yp = cx, cy
+                cv2.circle(frame, (idx_x, idx_y), 20, (255, 255, 255), cv2.FILLED)
 
-                cv2.line(st.session_state.canvas, (st.session_state.xp, st.session_state.yp), (cx, cy), draw_color, thickness)
-                st.session_state.xp, st.session_state.yp = cx, cy
+            # Drawing Mode (Only index finger up)
+            elif hand_lms.landmark[8].y < hand_lms.landmark[6].y:
+                cv2.circle(frame, (idx_x, idx_y), 15, colors[st.session_state.color_idx] if st.session_state.color_idx != -1 else (0,0,0), cv2.FILLED)
+                
+                if st.session_state.prev_x == 0 and st.session_state.prev_y == 0:
+                    st.session_state.prev_x, st.session_state.prev_y = idx_x, idx_y
+
+                draw_color = colors[st.session_state.color_idx] if st.session_state.color_idx != -1 else (0,0,0)
+                thickness = brush_size if st.session_state.color_idx != -1 else 60
+
+                cv2.line(st.session_state.canvas, (st.session_state.prev_x, st.session_state.prev_y), (idx_x, idx_y), draw_color, thickness)
+                st.session_state.prev_x, st.session_state.prev_y = idx_x, idx_y
             else:
-                st.session_state.xp, st.session_state.yp = 0, 0
+                st.session_state.prev_x, st.session_state.prev_y = 0, 0
 
-    # Merging Logic
-    img_gray = cv2.cvtColor(st.session_state.canvas, cv2.COLOR_BGR2GRAY)
-    _, img_inv = cv2.threshold(img_gray, 20, 255, cv2.THRESH_BINARY_INV)
-    img_inv = cv2.cvtColor(img_inv, cv2.COLOR_GRAY2BGR)
-    img_final = cv2.bitwise_and(frame, img_inv)
-    img_final = cv2.bitwise_or(img_final, st.session_state.canvas)
+    # Overlay Canvas on Video
+    gray_canvas = cv2.cvtColor(st.session_state.canvas, cv2.COLOR_BGR2GRAY)
+    _, inv_mask = cv2.threshold(gray_canvas, 20, 255, cv2.THRESH_BINARY_INV)
+    inv_mask = cv2.cvtColor(inv_mask, cv2.COLOR_GRAY2BGR)
+    
+    combined_img = cv2.bitwise_and(frame, inv_mask)
+    combined_img = cv2.bitwise_or(combined_img, st.session_state.canvas)
 
-    st.image(img_final, channels="BGR", use_container_width=True)
-
-    if st.sidebar.button("💾 Save Drawing"):
-        filename = f"drawing_{datetime.now().strftime('%H%M%S')}.png"
-        cv2.imwrite(filename, st.session_state.canvas)
-        st.sidebar.success("Saved!")
+    st.image(combined_img, channels="BGR", use_container_width=True)
